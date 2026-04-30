@@ -19,6 +19,7 @@
 #include "esp_heap_caps.h"
 
 #include "sdmmc_cmd.h"
+#include "driver/sdmmc_host.h"
 
 // ================= 硬體腳位定義 =================
 #define I2S_BCLK_IO     GPIO_NUM_26   // SCK / BCLK
@@ -151,25 +152,18 @@ static esp_err_t sd_card_init(void)
         .allocation_unit_size = 16 * 1024,
     };
 
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.slot = SPI2_HOST;
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.flags = SDMMC_HOST_FLAG_1BIT;
+    host.max_freq_khz = 20000;
+    
+    // ==========================================
+    // 3. 初始化 SDMMC Slot 配置
+    // ==========================================
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot_config.width = 1;
+    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
 
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num = SD_MOSI_PIN,
-        .miso_io_num = SD_MISO_PIN,
-        .sclk_io_num = SD_CLK_PIN,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 4096,
-    };
-
-    ESP_RETURN_ON_ERROR(spi_bus_initialize(host.slot, &bus_cfg, SPI_DMA_CH_AUTO), TAG, "spi_bus_initialize failed");
-
-    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-    slot_config.gpio_cs = SD_CS_PIN;
-    slot_config.host_id = host.slot;
-
-    return esp_vfs_fat_sdspi_mount("/sdcard", &host, &slot_config, &mount_config, &sd_card);
+    return esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &sd_card);
 }
 
 static void sd_card_deinit(void)
@@ -178,7 +172,6 @@ static void sd_card_deinit(void)
         esp_vfs_fat_sdcard_unmount("/sdcard", sd_card);
         sd_card = NULL;
     }
-    spi_bus_free(SPI2_HOST);
 }
 
 //========================
