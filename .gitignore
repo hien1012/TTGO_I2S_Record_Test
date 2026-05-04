@@ -66,6 +66,12 @@ env/
 .ccls-cache/
 compile_commands.json
 
+# VS Code configuration (machine-specific)
+.vscode/
+
+# Machine-specific build files
+main/CMakeLists.txt
+
 # Windows specific
 Thumbs.db
 ehthumbs.db
