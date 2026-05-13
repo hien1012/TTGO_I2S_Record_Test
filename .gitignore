@@ -53,6 +53,7 @@ CTestTestfile.cmake
 *.pyo
 *.pyd
 __pycache__/
+.numba_cache/
 *.egg-info/
 dist/
 
