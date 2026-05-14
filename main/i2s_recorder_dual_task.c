@@ -36,8 +36,8 @@
 #define DBG_SD_PIN      GPIO_NUM_18   // writer task 正在 fwrite
 
 // ================= 錄音參數 =================
-#define SAMPLE_RATE             16000
-#define RECORD_TIME_SEC         5
+#define SAMPLE_RATE             44100
+#define RECORD_TIME_SEC         10
 #define WAV_BITS_PER_SAMPLE     16
 #define WAV_CHANNELS            1
 
@@ -322,13 +322,13 @@ static void audio_pipeline_deinit(void)
 }
 
 //==============================================================================
-//  @brief  sound task (fill data to free block), send it to full block by QUEUE 
+//   sound task (fill data to free block), send it to full block by QUEUE 
 //============================================================================== 
 static void capture_task(void *arg)
 {
     (void)arg;
 
-    size_t target_samples = SAMPLE_RATE * RECORD_TIME_SEC;
+    size_t target_samples = SAMPLE_RATE * RECORD_TIME_SEC; /*44100 * 10s*/
     size_t total_samples_captured = 0;
     size_t bytes_read = 0;
     int64_t t0 = esp_timer_get_time();
@@ -367,26 +367,26 @@ static void capture_task(void *arg)
                 blk->sample_count = 0;
             }
         }
-    }
+    }                                                   /* after capture enough samples */
 
-    if (blk && blk->sample_count > 0) {
+    if (blk && blk->sample_count > 0) {                 /* send the last block */
         xQueueSend(q_full_blocks, &blk, portMAX_DELAY);
     }
 
-    blk = NULL; // sentinel
+    blk = NULL;                                         // sentinel
     xQueueSend(q_full_blocks, &blk, portMAX_DELAY);
 
     gpio_set_level(DBG_REC_PIN, 0);
-    capture_done = true;
+    capture_done = true;                                /* 標記為已經完成capture */
 
-    double elapsed_s = (esp_timer_get_time() - t0) / 1000000.0;
+    double elapsed_s = (esp_timer_get_time() - t0) / 1000000.0; /* 計算capture所耗的時間 */
     ESP_LOGI(TAG, "capture_task done: %u samples, elapsed=%.3f s", (unsigned)total_samples_captured, elapsed_s);
-    vTaskDelete(NULL);
+    vTaskDelete(NULL);                                  /* Delete task */
 }
 
 
 /**
- * @brief sound data to SDCard, 清空所接收到的 fullblock, 將這個block 傳遞給 capture task
+ * @brief Write sound data to SD Card, 清空所接收到的 fullblock, 將該 block 傳遞給 capture task
  */
 static void writer_task(void *arg)
 {
@@ -410,7 +410,16 @@ static void writer_task(void *arg)
         if (blk == NULL) {
             break;
         }
-
+        for (int i = 0; i < blk->sample_count; i++) {
+            int32_t sample = (int32_t)(blk->samples[i] * 50.0f);
+            if (sample > INT16_MAX) {
+                blk->samples[i] = INT16_MAX;
+            } else if (sample < INT16_MIN) {
+                blk->samples[i] = INT16_MIN;
+            } else {
+                blk->samples[i] = (int16_t)sample;
+            }
+        }
         gpio_set_level(DBG_SD_PIN, 1);
         size_t written = fwrite(blk->samples, sizeof(int16_t), blk->sample_count, f);
         gpio_set_level(DBG_SD_PIN, 0);
@@ -518,7 +527,7 @@ void app_main(void)
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
     ESP_LOGI(TAG, "Recording finished: %s", g_record_path);
-    ESP_LOGI(TAG, "capture_done=%d writer_done=%d overflow_count=%u total_samples_written=%u",
+    ESP_LOGI(TAG, "capture_done = %d; writer_done= %d; overflow_count= %u; total_samples_written= %u",
              capture_done, writer_done, (unsigned)overflow_count, (unsigned)g_total_samples_written);
 
     audio_pipeline_deinit();
