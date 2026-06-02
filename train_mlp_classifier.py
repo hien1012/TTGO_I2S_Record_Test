@@ -69,7 +69,7 @@ def compute_mfcc_frames(y: np.ndarray, sr: int, n_fft: int = 1024,
     
     n_frames = 1 + (len(y) - n_fft) // hop_length
     S = np.zeros((n_fft // 2 + 1, n_frames), dtype=np.float32)
-    window = np.hanning(n_fft).astype(np.float32)
+    window = np.hamming(n_fft).astype(np.float32)
     
     for i in range(n_frames):
         start = i * hop_length
@@ -82,6 +82,8 @@ def compute_mfcc_frames(y: np.ndarray, sr: int, n_fft: int = 1024,
     
     # Apply mel filterbank
     mel_spec = np.dot(mel_fb, S)
+    frame_means = np.mean(mel_spec, axis=0, keepdims=True) #針對每一幀求平均
+    #relative_mel_spec = mel_spec / (frame_means + 1e-10)
     mel_spec_db = 20 * np.log10(mel_spec + 1e-10)
     
     # Apply DCT for MFCC
@@ -113,14 +115,45 @@ def scipy_dct(x: np.ndarray, norm: str = 'ortho') -> np.ndarray:
     return result
 
 
-def extract_mfcc_statistics(y: np.ndarray, sr: int, n_fft: int = 1024,
+def normalize_rms(y: np.ndarray, target_db: float = -20.0) -> np.ndarray:
+    """Normalize audio to a target RMS level in dB."""
+    rms = np.sqrt(np.mean(y**2))
+    if rms < 1e-10:
+        return y
+    scalar = 10**(target_db / 20.0) / (rms + 1e-10)
+    return y * scalar
+
+
+def compute_simple_delta(feat: np.ndarray) -> np.ndarray:
+    """
+    MCU-friendly Delta computation (Central Difference).
+    feat shape: (n_mels, n_frames)
+    """
+    delta = np.zeros_like(feat)
+    
+    # 計算時間軸 (axis=1) 上的中央差分: delta[t] = (feat[t+1] - feat[t-1]) / 2
+    # 這在 C 語言中只需要一個簡單的 for 迴圈就能實作
+    delta[:, 1:-1] = (feat[:, 2:] - feat[:, :-2]) / 2.0
+    
+    # 處理邊界條件 (前向差分與後向差分)
+    delta[:, 0] = feat[:, 1] - feat[:, 0]
+    delta[:, -1] = feat[:, -1] - feat[:, -2]
+    
+    return delta
+
+def extract_mfcc_statistics_old_mean_std(y: np.ndarray, sr: int, n_fft: int = 1024,
                            hop_length: int = 512, n_mels: int = 13) -> np.ndarray:
     """Extract MFCC statistics: mean and std of each coefficient (26 features)."""
     
+    # 1. Apply RMS normalization to balance global volume
+    # = normalize_rms(y, target_db=-20.0)
+    
+    # 2. Compute frames
     mfcc_frames = compute_mfcc_frames(y, sr, n_fft, hop_length, n_mels)
     
-    # Compute mean and std for each MFCC coefficient
+    # 3. Compute mean and std for each MFCC coefficient
     mfcc_mean = np.mean(mfcc_frames, axis=1)  # (13,)
+    mfcc_mean = mfcc_mean - np.mean(mfcc_mean) # CMS
     mfcc_std = np.std(mfcc_frames, axis=1)    # (13,)
     
     # Concatenate into 26-dimensional feature vector
@@ -128,6 +161,43 @@ def extract_mfcc_statistics(y: np.ndarray, sr: int, n_fft: int = 1024,
     
     return features
 
+#this is delta std, std
+def extract_mfcc_statistics(y: np.ndarray, sr: int, n_fft: int = 1024,
+                           hop_length: int = 512, n_mels: int = 13,
+                           pre_emphasis_alpha: float = 0.97) -> np.ndarray:
+    """
+    Extract robust 26-dim features (MFCC Std + Delta Std) against Mic Shift.
+    """
+    
+    # 1. 去除直流偏移 (DC Offset Removal)
+    y = y - np.mean(y)
+    
+    # 2. 預強調 (Pre-emphasis)
+    y = np.append(y[0], y[1:] - pre_emphasis_alpha * y[:-1])
+    
+    # 3. 音量正規化 (RMS Normalization)
+    y = normalize_rms(y, target_db=-20.0)
+    
+    # 4. 計算逐幀 MFCC (13, n_frames)
+    mfcc_frames = compute_mfcc_frames(y, sr, n_fft, hop_length, n_mels)
+    
+    # 5. 倒頻譜均值相減 (True CMS) - 抹除麥克風 LTI 差異
+    time_axis_mean = np.mean(mfcc_frames, axis=1, keepdims=True)
+    mfcc_cms = mfcc_frames - time_axis_mean
+    
+    # 6. 計算一階差分 (Delta Feature) - 捕捉動態變化
+    # 注意：Delta 是在做完 CMS 後的特徵上計算
+    delta_frames = compute_simple_delta(mfcc_cms)
+    
+    # 7. 提取統計特徵
+    # 放棄 mean (因為 CMS 後 mean 趨近於 0)
+    mfcc_std = np.std(mfcc_cms, axis=1)      # 13 維：各頻段能量波動幅度
+    delta_std = np.std(delta_frames, axis=1) # 13 維：各頻段能量變化率的波動幅度
+    
+    # 8. 組合為 26 維特徵向量
+    features = np.concatenate([mfcc_std, delta_std]).astype(np.float32)
+    
+    return features
 
 def read_wav_mono(path: Path, target_sr: int = None) -> Tuple[int, np.ndarray]:
     """Read WAV file and convert to mono."""
