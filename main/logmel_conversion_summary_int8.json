@@ -1,0 +1,81 @@
+{
+  "model": "C:\\Users\\Potato\\ESP_project file\\TTGO_I2S_Record_Test\\cnn_output\\logmel_cmvn\\0909_outdoor\\pdm\\logmel_cnn_classifier_int8.tflite",
+  "config": "C:\\Users\\Potato\\ESP_project file\\TTGO_I2S_Record_Test\\cnn_output\\logmel_cmvn\\0909_outdoor\\pdm\\preprocess_config.json",
+  "model_size_bytes": 13432,
+  "model_sha256": "2d41ad191316e77640c2800d10571c39675afddeef58696d0dc85750d3037090",
+  "model_info": {
+    "input_shape": [
+      1,
+      32,
+      124,
+      1
+    ],
+    "input_dtype": "int8",
+    "input_scale": 0.0455048568546772,
+    "input_zero_point": 15,
+    "output_shape": [
+      1,
+      3
+    ],
+    "output_dtype": "int8",
+    "output_scale": 0.00390625,
+    "output_zero_point": -128,
+    "ops": [
+      "AVERAGE_POOL_2D",
+      "CONV_2D",
+      "DEPTHWISE_CONV_2D",
+      "MAX_POOL_2D",
+      "MEAN",
+      "SOFTMAX"
+    ]
+  },
+  "mel_f_min_hz": 250.0,
+  "mel_f_max_hz": 2500.0,
+  "mel_bin_edges": [
+    8,
+    9,
+    10,
+    11,
+    12,
+    14,
+    15,
+    16,
+    18,
+    19,
+    21,
+    23,
+    24,
+    26,
+    28,
+    30,
+    32,
+    34,
+    36,
+    38,
+    41,
+    43,
+    46,
+    48,
+    51,
+    53,
+    56,
+    59,
+    62,
+    66,
+    69,
+    72,
+    76,
+    80
+  ],
+  "normalization_mean": [
+    1.0303462527616603e-09
+  ],
+  "normalization_std": [
+    0.9999627470970154
+  ],
+  "class_names": [
+    "background",
+    "drone",
+    "helicopter"
+  ]
+}

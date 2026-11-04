@@ -1,0 +1,23 @@
+# Standalone source list for the full-int8 CNN firmware variant.
+# Rename/copy this file to CMakeLists.txt when selecting the int8 build, while
+# preserving the existing float32 CMakeLists.txt unchanged.
+
+# Use app_audio_infer_pdm_int8.c instead for the PDM microphone variant.
+idf_component_register(
+    SRCS
+        "app_audio_infer_int8.c"
+        "model_runner_int8.cc"
+        "model_data_int8.cc"
+        "logmel_features_int8.c"
+        "memory_monitor.c"
+    PRIV_REQUIRES
+        app_update
+        esp_psram
+        esp_timer
+        driver
+        fatfs
+        sdmmc
+        spi_flash
+        espressif__esp-tflite-micro
+    INCLUDE_DIRS "."
+)

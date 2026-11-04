@@ -1,0 +1,9 @@
+# Python packages for the log-mel CMVN training / evaluation scripts.
+# Versions verified with Python 3.11 on the original training machine.
+#   pip install -r requirements-logmel.txt
+numpy==2.2.6
+scipy==1.15.3
+scikit-learn==1.8.0
+matplotlib==3.10.9
+tensorflow==2.20.0
+keras==3.14.0
