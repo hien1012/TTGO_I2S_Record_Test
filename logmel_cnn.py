@@ -18,9 +18,9 @@ import numpy as np
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 
-from audio_dataset import Dataset
+from audio_dataset import LABEL_TO_ID, Dataset
 from log_mel_features import DEFAULT_CMVN_STD_FLOOR_DB
-from training_reports import grouped_indices_by_source
+from training_reports import grouped_indices_by_source, source_group_name
 
 
 CHANNEL_COUNTS = {
@@ -29,7 +29,13 @@ CHANNEL_COUNTS = {
     "logmel-cmn-delta": 3,
     "cmn-delta": 2,
     "cmvn": 1,
+    "ltcmn": 1,
+    "cmvn-ltcmn": 2,
 }
+# Modes that need a per-microphone long-term band profile, which a single clip
+# cannot provide; normalize_and_reshape computes it from each mic's recordings.
+LTCMN_MODES = {"ltcmn", "cmvn-ltcmn"}
+LTCMN_REFERENCES = ("background", "all")
 
 
 def load_tensorflow():
@@ -78,8 +84,67 @@ def parse_mel_band_mask(specs: list[str] | None, n_mels: int) -> list[int]:
     return sorted(indices)
 
 
-def build_input_channels(images: np.ndarray, mode: str) -> np.ndarray:
-    """Derive inexpensive channel-invariant views from one stored log-mel image."""
+def remove_clip_level(images: np.ndarray) -> np.ndarray:
+    """Subtract one scalar per clip (mean over all bands and frames).
+
+    This removes source distance / recording gain but keeps the clip's spectral
+    shape, unlike per-band CMN which also removes the steady harmonic envelope.
+    """
+    raw = np.asarray(images, dtype=np.float32)
+    return raw - np.mean(raw, axis=(1, 2), keepdims=True, dtype=np.float32)
+
+
+def long_term_band_profiles(
+    images: np.ndarray,
+    group_keys: list[str],
+    labels: np.ndarray,
+    reference: str,
+) -> Dict[str, np.ndarray]:
+    """Per-microphone mean band profile of level-free log-mel.
+
+    Stands in for a firmware running mean over minutes of audio. ``background``
+    averages only background clips (a running mean gated to non-target periods);
+    ``all`` averages every clip without using labels.
+    """
+    if reference not in LTCMN_REFERENCES:
+        raise ValueError(f"Unsupported long-term CMN reference: {reference}")
+    level_free = remove_clip_level(images)
+    keys = np.asarray(group_keys)
+    selected = (
+        np.asarray(labels) == LABEL_TO_ID["background"]
+        if reference == "background"
+        else np.ones(len(keys), dtype=bool)
+    )
+    profiles: Dict[str, np.ndarray] = {}
+    for key in sorted(set(group_keys)):
+        indices = np.flatnonzero((keys == key) & selected)
+        if len(indices) == 0:
+            raise ValueError(f"No {reference} clips to build the long-term profile of {key!r}")
+        profiles[key] = np.mean(level_free[indices], axis=(0, 2), dtype=np.float64).astype(np.float32)
+    return profiles
+
+
+def apply_long_term_cmn(
+    images: np.ndarray, group_keys: list[str], profiles: Dict[str, np.ndarray]
+) -> np.ndarray:
+    """Level-free log-mel minus the clip's microphone profile."""
+    level_free = remove_clip_level(images)
+    offsets = np.stack([profiles[key] for key in group_keys])[:, :, np.newaxis]
+    return (level_free - offsets).astype(np.float32)
+
+
+def build_input_channels(
+    images: np.ndarray, mode: str, ltcmn: np.ndarray | None = None
+) -> np.ndarray:
+    """Derive inexpensive channel-invariant views from one stored log-mel image.
+
+    ``ltcmn`` is the apply_long_term_cmn output, required by LTCMN_MODES.
+    """
+    if mode in LTCMN_MODES and ltcmn is None:
+        raise ValueError(
+            f"Input mode {mode!r} needs per-microphone long-term profiles; "
+            "build it through normalize_and_reshape"
+        )
     raw = np.asarray(images, dtype=np.float32)
     cmn = raw - np.mean(raw, axis=2, keepdims=True, dtype=np.float32)
     cmvn_std = np.std(raw, axis=2, keepdims=True, dtype=np.float32)
@@ -87,10 +152,12 @@ def build_input_channels(images: np.ndarray, mode: str) -> np.ndarray:
 
     # Keep the legacy modes unchanged. cmn-delta intentionally excludes raw
     # log-mel so the CNN cannot rely directly on a fixed microphone response.
-    channels = [] if mode in {"cmn-delta", "cmvn"} else [raw]
-    if mode == "cmvn":
+    channels = [] if mode in {"cmn-delta", "cmvn", *LTCMN_MODES} else [raw]
+    if mode in {"cmvn", "cmvn-ltcmn"}:
         # The floor prevents low-energy, nearly constant bands from amplifying noise.
         channels.append(cmvn)
+    if mode in LTCMN_MODES:
+        channels.append(np.asarray(ltcmn, dtype=np.float32))
     if mode in {"logmel-cmn-delta", "cmn-delta"}:
         channels.append(cmn)
     if mode in {"logmel-delta", "logmel-cmn-delta", "cmn-delta"}:
@@ -110,12 +177,63 @@ def normalize_and_reshape(
     frame_count: int,
     channel_mode: str,
     masked_mel_bands: list[int] | None = None,
+    *,
+    ltcmn_reference: str = "background",
+    ltcmn_info: Dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[float], list[float]]:
-    """Normalize from train statistics, then zero optional Mel rows."""
+    """Normalize from train statistics, then zero optional Mel rows.
+
+    For LTCMN_MODES each microphone (source folder) gets its own long-term
+    profile: train/val use the profile of the clean, non-augmented train clips;
+    every test folder uses one built from its own clips, as a deployed node's
+    running mean would. The profiles are written into ``ltcmn_info``.
+    """
     base_shape = (-1, n_mels, frame_count)
-    train = build_input_channels(train_data.X.reshape(base_shape), channel_mode)
-    val = build_input_channels(val_data.X.reshape(base_shape), channel_mode)
-    test = build_input_channels(test_data.X.reshape(base_shape), channel_mode)
+    images = {
+        "train": train_data.X.reshape(base_shape),
+        "val": val_data.X.reshape(base_shape),
+        "test": test_data.X.reshape(base_shape),
+    }
+    ltcmn: Dict[str, np.ndarray | None] = {"train": None, "val": None, "test": None}
+    if channel_mode in LTCMN_MODES:
+        datasets = {"train": train_data, "val": val_data, "test": test_data}
+        keys = {
+            name: [source_group_name(data, index) for index in range(len(data.y))]
+            for name, data in datasets.items()
+        }
+        augmentation = train_data.config.get("training_augmentation", {})
+        clean_count = int(augmentation.get("original_train_samples", len(train_data.y)))
+        clean_count = min(max(clean_count, 1), len(train_data.y))
+        train_profiles = long_term_band_profiles(
+            images["train"][:clean_count],
+            keys["train"][:clean_count],
+            train_data.y[:clean_count],
+            ltcmn_reference,
+        )
+        missing_val = sorted(set(keys["val"]) - set(train_profiles))
+        if missing_val:
+            raise ValueError(f"Validation microphones without a train profile: {missing_val}")
+        test_profiles = long_term_band_profiles(
+            images["test"], keys["test"], test_data.y, ltcmn_reference
+        )
+        profiles = {"train": train_profiles, "val": train_profiles, "test": test_profiles}
+        for name in ltcmn:
+            ltcmn[name] = apply_long_term_cmn(images[name], keys[name], profiles[name])
+        if ltcmn_info is not None:
+            ltcmn_info.update(
+                {
+                    "reference": ltcmn_reference,
+                    "clip_level": "scalar_mean_over_bands_and_frames_removed_per_clip",
+                    "train_profile_source": f"first {clean_count} non-augmented train clips",
+                    "test_profile_source": "each test folder's own clips",
+                    "test_reference_uses_labels": ltcmn_reference == "background",
+                    "train_profiles_db": {k: v.astype(float).tolist() for k, v in train_profiles.items()},
+                    "test_profiles_db": {k: v.astype(float).tolist() for k, v in test_profiles.items()},
+                }
+            )
+    train = build_input_channels(images["train"], channel_mode, ltcmn["train"])
+    val = build_input_channels(images["val"], channel_mode, ltcmn["val"])
+    test = build_input_channels(images["test"], channel_mode, ltcmn["test"])
 
     mean = np.mean(train, axis=(0, 1, 2), dtype=np.float64).astype(np.float32)
     std = np.std(train, axis=(0, 1, 2), dtype=np.float64).astype(np.float32)

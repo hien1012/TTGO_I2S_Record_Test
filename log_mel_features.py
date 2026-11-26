@@ -249,6 +249,8 @@ def log_mel_feature_config(
         "logmel-cmn-delta": 3,
         "cmn-delta": 2,
         "cmvn": 1,
+        "ltcmn": 1,
+        "cmvn-ltcmn": 2,
     }[input_channels]
     return {
         "input_dir": str(input_dir),
@@ -275,7 +277,7 @@ def log_mel_feature_config(
         },
         "input_channels": input_channels,
         "cmvn": {
-            "enabled": input_channels == "cmvn",
+            "enabled": input_channels in {"cmvn", "cmvn-ltcmn"},
             "mean_axis": "per_sample_per_mel_over_time",
             "variance_axis": "per_sample_per_mel_over_time",
             "std_floor_db": DEFAULT_CMVN_STD_FLOOR_DB,

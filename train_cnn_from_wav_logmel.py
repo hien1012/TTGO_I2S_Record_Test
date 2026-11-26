@@ -56,6 +56,8 @@ from log_mel_features import (
 )
 from logmel_cnn import (
     CHANNEL_COUNTS,
+    LTCMN_MODES,
+    LTCMN_REFERENCES,
     build_logmel_cnn,
     class_weight_from_labels,
     compare_model_weights,
@@ -123,6 +125,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-db", type=float, default=DEFAULT_TOP_DB)
     parser.add_argument("--log-reference", choices=["sample_max", "absolute"], default="sample_max")
     parser.add_argument("--input-channels", choices=sorted(CHANNEL_COUNTS), default="logmel")
+    parser.add_argument(
+        "--ltcmn-reference",
+        choices=LTCMN_REFERENCES,
+        default="background",
+        help=(
+            "Clips that build each microphone's long-term band profile for the "
+            "ltcmn / cmvn-ltcmn inputs: background clips only (a running mean "
+            "gated to non-target periods; uses test labels to select test clips) "
+            "or all clips (no labels)."
+        ),
+    )
     parser.add_argument(
         "--mask-mel-bands",
         nargs="+",
@@ -262,6 +275,7 @@ def main() -> None:
     # 3. Model input: derived channels + train-only normalization.
     # ------------------------------------------------------------------
     class_names = audio_dataset.class_names_from_configs(configs)
+    ltcmn_info: dict = {}
     X_train, X_val, X_test, normalization_mean, normalization_std = normalize_and_reshape(
         train_data,
         val_data,
@@ -270,7 +284,10 @@ def main() -> None:
         frame_count,
         args.input_channels,
         masked_mel_bands,
+        ltcmn_reference=args.ltcmn_reference,
+        ltcmn_info=ltcmn_info,
     )
+    long_term_cmn = ltcmn_info if args.input_channels in LTCMN_MODES else None
     y_train = train_data.y.astype(np.int64)
     y_val = val_data.y.astype(np.int64)
     y_test = test_data.y.astype(np.int64)
@@ -482,6 +499,7 @@ def main() -> None:
             "fill_value_after_normalization": 0.0,
             "application_stage": "after_channel_derivation_and_train_scalar_normalization",
         },
+        "long_term_cmn": long_term_cmn,
         "training_augmentation": train_data.config.get(
             "training_augmentation", augmentation_config_from_args(args)
         ),
@@ -610,6 +628,7 @@ def main() -> None:
             "normalization_mean": normalization_mean,
             "normalization_std": normalization_std,
             "mel_band_mask": metrics["mel_band_mask"],
+            "long_term_cmn": long_term_cmn,
             "class_names": class_names,
             "keras_model_path": str(model_path),
             "keras_model_role": metrics["model_role"],

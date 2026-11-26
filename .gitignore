@@ -99,6 +99,8 @@ mlp*/
 rf*/
 build_audio_infer/
 build_audio_infer_pdm/
+build_i2s/
+build_pdm/
 cnn_output/
 pcen_mic*/
 logmel_c_comparison*/
@@ -110,3 +112,11 @@ int8_generated*/
 audio_classifier*/
 three*/
 evaluation*/
+backup*/
+做法比較/
+eval_result/
+dump*/
+cam_dump/
+infer_node*/
+mfcc_function-2.c
+build_mfcc25_reference.exe

@@ -7,6 +7,10 @@ Each input WAV is labeled from its filename prefix, resampled to the training
 sample rate, split into fixed non-overlapping segments, and processed with the
 same feature contract recorded in preprocess_config.json.  Metrics are emitted
 for all folders together and for each microphone folder separately.
+
+With --compare-model, a second model (typically the full-int8 TFLite) is run on
+exactly the same segments and its accuracy delta, prediction agreement, and
+probability error relative to the primary (float) model are reported.
 """
 
 from __future__ import annotations
@@ -19,6 +23,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.io import wavfile
@@ -36,6 +43,8 @@ from log_mel_features import extract_log_mel_spectrogram, stft_frame_count
 
 SUPPORTED_FEATURE_MODES = ("auto", "logmel-cmvn")
 MODEL_SUFFIXES = {".keras", ".h5", ".tflite"}
+COMPARE_MODEL_AUTO = "auto"
+DEFAULT_INT8_MODEL_NAME = "logmel_cnn_classifier_int8.tflite"
 
 
 @dataclass(frozen=True)
@@ -248,6 +257,22 @@ def resolve_paths(args: argparse.Namespace) -> tuple[Path, Path]:
     if not model_path.is_file():
         raise FileNotFoundError(f"Model not found: {model_path}")
     return model_path, config_path
+
+
+def resolve_compare_model_path(args: argparse.Namespace, model_path: Path) -> Path | None:
+    """Return the optional comparison model; 'auto' picks the int8 TFLite next to the model."""
+    if args.compare_model is None:
+        return None
+    if args.compare_model == COMPARE_MODEL_AUTO:
+        search_dir = args.model_dir.resolve() if args.model_dir else model_path.parent
+        compare_path = search_dir / DEFAULT_INT8_MODEL_NAME
+    else:
+        compare_path = Path(args.compare_model).resolve()
+    if not compare_path.is_file():
+        raise FileNotFoundError(f"Comparison model not found: {compare_path}")
+    if compare_path == model_path:
+        raise ValueError("--compare-model must be different from the primary model")
+    return compare_path
 
 
 def infer_label_from_prefix(path: Path, class_names: Sequence[str]) -> str | None:
@@ -536,21 +561,103 @@ def save_confusion_matrix(
         for class_name, row in zip(class_names, matrix):
             writer.writerow([class_name, *row.tolist()])
 
-    figure, axis = plt.subplots(figsize=(6.4, 5.4))
+    figure, axis = plt.subplots(figsize=(9, 7.5))
     image = axis.imshow(matrix, cmap="Blues")
-    axis.set_xticks(range(len(class_names)), class_names, rotation=30, ha="right")
-    axis.set_yticks(range(len(class_names)), class_names)
-    axis.set_xlabel("Predicted label")
-    axis.set_ylabel("True label")
-    axis.set_title(title)
+    axis.set_xticks(range(len(class_names)), class_names, rotation=25, ha="right", fontsize=16)
+    axis.set_yticks(range(len(class_names)), class_names, fontsize=16)
+    axis.set_xlabel("Predicted label", fontsize=18)
+    axis.set_ylabel("True label", fontsize=18)
+    axis.set_title(title, fontsize=20)
     threshold = float(matrix.max()) / 2.0 if matrix.size else 0.0
     for row in range(matrix.shape[0]):
         for column in range(matrix.shape[1]):
             color = "white" if matrix[row, column] > threshold else "black"
-            axis.text(column, row, str(matrix[row, column]), ha="center", va="center", color=color)
-    figure.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
+            axis.text(
+                column, row, str(matrix[row, column]),
+                ha="center", va="center", color=color, fontsize=22, fontweight="bold",
+            )
+    colorbar = figure.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
+    colorbar.ax.tick_params(labelsize=14)
     figure.tight_layout()
     figure.savefig(output_prefix.with_suffix(".png"), dpi=180)
+    plt.close(figure)
+
+
+def save_evaluation_dashboard(
+    path: Path,
+    matrix: np.ndarray,
+    report: dict[str, Any],
+    class_names: Sequence[str],
+    title: str,
+    balanced_accuracy: float,
+) -> None:
+    """Large-font figure: confusion matrix (count + row %) beside the metrics table."""
+    row_total = np.sum(matrix, axis=1, keepdims=True)
+    normalized = np.divide(
+        matrix, row_total,
+        out=np.zeros_like(matrix, dtype=np.float64),
+        where=row_total > 0,
+    )
+
+    figure = plt.figure(figsize=(22, 9))
+    grid = figure.add_gridspec(1, 2, width_ratios=(1.0, 1.25), wspace=0.40)
+
+    matrix_axis = figure.add_subplot(grid[0, 0])
+    image = matrix_axis.imshow(normalized, vmin=0.0, vmax=1.0, cmap="Blues")
+    matrix_axis.set_xticks(range(len(class_names)), class_names, rotation=20, ha="right", fontsize=18)
+    matrix_axis.set_yticks(range(len(class_names)), class_names, fontsize=18)
+    matrix_axis.set_xlabel("Predicted label", fontsize=20, labelpad=10)
+    matrix_axis.set_ylabel("True label", fontsize=20, labelpad=10)
+    matrix_axis.set_title("Confusion matrix (count / row %)", fontsize=22, pad=14)
+    for row in range(matrix.shape[0]):
+        for column in range(matrix.shape[1]):
+            color = "white" if normalized[row, column] >= 0.55 else "black"
+            matrix_axis.text(
+                column, row,
+                f"{matrix[row, column]}\n{normalized[row, column] * 100.0:.1f}%",
+                ha="center", va="center", color=color, fontsize=22, fontweight="bold",
+            )
+    colorbar = figure.colorbar(image, ax=matrix_axis, fraction=0.046, pad=0.04)
+    colorbar.ax.tick_params(labelsize=15)
+    colorbar.set_label("Fraction of true class", fontsize=16)
+
+    report_axis = figure.add_subplot(grid[0, 1])
+    report_axis.axis("off")
+    row_names = [*class_names, "macro avg", "weighted avg"]
+    cell_text = [
+        [
+            f"{float(report[name]['precision']):.3f}",
+            f"{float(report[name]['recall']):.3f}",
+            f"{float(report[name]['f1-score']):.3f}",
+            f"{int(report[name]['support'])}",
+        ]
+        for name in row_names
+    ]
+    table = report_axis.table(
+        cellText=cell_text,
+        rowLabels=row_names,
+        colLabels=["Precision", "Recall", "F1", "Support"],
+        cellLoc="center",
+        rowLoc="center",
+        bbox=[0.0, 0.12, 1.0, 0.72],  # keep row labels inside this axis
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(20)
+    for (row, column), cell in table.get_celld().items():
+        if row == 0 or column == -1:
+            cell.set_text_props(fontweight="bold")
+            cell.set_facecolor("#dbe7f3")
+    report_axis.set_title(
+        f"Accuracy = {float(report['accuracy']):.4f}    "
+        f"Balanced acc = {balanced_accuracy:.4f}\n"
+        f"Segments = {int(matrix.sum())}",
+        fontsize=22,
+        pad=20,
+    )
+
+    figure.suptitle(title, fontsize=26, fontweight="bold")
+    figure.subplots_adjust(top=0.83, bottom=0.14, left=0.06, right=0.97)
+    figure.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(figure)
 
 
@@ -606,11 +713,53 @@ def calculate_metrics(
     }
     prefix = output_dir / f"{safe_name(group_name)}_confusion_matrix"
     save_confusion_matrix(prefix, matrix, class_names, f"Confusion Matrix: {group_name}")
+    save_evaluation_dashboard(
+        output_dir / f"{safe_name(group_name)}_evaluation_summary.png",
+        matrix,
+        report,
+        class_names,
+        f"Evaluation: {group_name}",
+        metrics["balanced_accuracy"],
+    )
     write_rows(
         output_dir / f"{safe_name(group_name)}_classification_report.csv",
         report_rows(report),
     )
     return metrics
+
+
+def summarize_model_comparison(
+    prediction_rows: Sequence[dict[str, Any]],
+    baseline_metrics: dict[str, Any],
+    compare_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    """Accuracy delta and prediction parity between the primary and comparison model."""
+    baseline_correct = np.asarray([bool(row["correct"]) for row in prediction_rows])
+    compare_correct = np.asarray([bool(row["compare_correct"]) for row in prediction_rows])
+    match = np.asarray([bool(row["prediction_match"]) for row in prediction_rows])
+    max_diff = np.asarray([float(row["prob_max_abs_diff"]) for row in prediction_rows])
+    mean_diff = np.asarray([float(row["prob_mean_abs_diff"]) for row in prediction_rows])
+    result: dict[str, Any] = {
+        "group": baseline_metrics["group"],
+        "segments": int(len(prediction_rows)),
+    }
+    for key in ("accuracy", "balanced_accuracy", "macro_f1"):
+        result[f"baseline_{key}"] = float(baseline_metrics[key])
+        result[f"compare_{key}"] = float(compare_metrics[key])
+        result[f"{key}_delta"] = float(compare_metrics[key] - baseline_metrics[key])
+    result.update(
+        {
+            "prediction_agreement": float(np.mean(match)),
+            "disagreement_count": int(np.sum(~match)),
+            "both_correct": int(np.sum(baseline_correct & compare_correct)),
+            "baseline_only_correct": int(np.sum(baseline_correct & ~compare_correct)),
+            "compare_only_correct": int(np.sum(~baseline_correct & compare_correct)),
+            "both_wrong": int(np.sum(~baseline_correct & ~compare_correct)),
+            "prob_max_abs_diff": float(np.max(max_diff)),
+            "prob_mean_abs_diff": float(np.mean(mean_diff)),
+        }
+    )
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -623,6 +772,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-dir", type=Path, help="Directory containing model and preprocess_config.json.")
     parser.add_argument("--model", type=Path, help="Explicit .keras, .h5, or .tflite model path.")
     parser.add_argument("--config", type=Path, help="Explicit preprocess_config.json path.")
+    parser.add_argument(
+        "--compare-model",
+        nargs="?",
+        const=COMPARE_MODEL_AUTO,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Also run this model (e.g. the int8 TFLite) on the same segments and report "
+            "accuracy delta and prediction agreement versus --model. Without PATH, uses "
+            f"{DEFAULT_INT8_MODEL_NAME} from --model-dir (or the primary model's folder)."
+        ),
+    )
     parser.add_argument("--feature-mode", choices=SUPPORTED_FEATURE_MODES, default="auto")
     parser.add_argument("--segment-seconds", type=float, help="Segment duration; defaults to the training config.")
     parser.add_argument("--segment-hop-seconds", type=float, help="Segment step; defaults to non-overlapping segments.")
@@ -668,6 +829,7 @@ def main() -> None:
         raise ValueError("--batch-size must be greater than zero")
 
     model_path, config_path = resolve_paths(args)
+    compare_model_path = resolve_compare_model_path(args, model_path)
     config = load_json(config_path)
     feature_mode = detect_feature_mode(config, args.feature_mode)
     class_names = [str(value) for value in config.get("class_names", [])]
@@ -689,6 +851,12 @@ def main() -> None:
     validate_config(config, feature_mode, segment_seconds)
 
     model = InferenceModel(model_path)
+    compare_model = InferenceModel(compare_model_path) if compare_model_path else None
+    if compare_model is not None and compare_model.input_shape != model.input_shape:
+        raise ValueError(
+            "Comparison model input shape differs from the primary model: "
+            f"{compare_model.input_shape} vs {model.input_shape}"
+        )
     extractor = make_feature_extractor(config, feature_mode)
     wavs = collect_wavs(input_dirs)
     if not wavs:
@@ -696,6 +864,11 @@ def main() -> None:
 
     print(f"Feature mode: {feature_mode}")
     print(f"Model: {model_path} ({model.kind}, input={model.input_shape}, dtype={model.input_dtype})")
+    if compare_model is not None:
+        print(
+            f"Compare model: {compare_model_path} "
+            f"({compare_model.kind}, dtype={compare_model.input_dtype})"
+        )
     print(f"Config: {config_path}")
     print(f"WAV files: {len(wavs)}")
     print(f"Segment: {segment_seconds:g}s, hop={hop_seconds:g}s, tail={args.tail_policy}")
@@ -732,9 +905,18 @@ def main() -> None:
         raise ValueError(
             f"Model output mismatch: expected {(len(records), len(class_names))}, got {probabilities.shape}"
         )
+    compare_probabilities: np.ndarray | None = None
+    if compare_model is not None:
+        print("Running comparison model on the same segments...")
+        compare_probabilities = compare_model.predict(features, args.batch_size)
+        if compare_probabilities.shape != probabilities.shape:
+            raise ValueError(
+                f"Comparison model output mismatch: expected {probabilities.shape}, "
+                f"got {compare_probabilities.shape}"
+            )
 
     prediction_rows: list[dict[str, Any]] = []
-    for record, probability in zip(records, probabilities):
+    for sample_index, (record, probability) in enumerate(zip(records, probabilities)):
         predicted_id = int(np.argmax(probability))
         ordered = np.sort(probability)
         confidence = float(ordered[-1])
@@ -757,6 +939,22 @@ def main() -> None:
         }
         for class_name, value in zip(class_names, probability):
             row[f"prob_{class_name}"] = float(value)
+        if compare_probabilities is not None:
+            compare_probability = compare_probabilities[sample_index]
+            compare_label = class_names[int(np.argmax(compare_probability))]
+            difference = np.abs(compare_probability - probability)
+            row.update(
+                {
+                    "compare_predicted_label": compare_label,
+                    "compare_correct": int(compare_label == record.true_label),
+                    "compare_confidence": float(np.max(compare_probability)),
+                    "prediction_match": int(compare_label == predicted_label),
+                    "prob_max_abs_diff": float(np.max(difference)),
+                    "prob_mean_abs_diff": float(np.mean(difference)),
+                }
+            )
+            for class_name, value in zip(class_names, compare_probability):
+                row[f"compare_prob_{class_name}"] = float(value)
         prediction_rows.append(row)
 
     # Put errors first, then high-confidence mistakes, to speed up inspection.
@@ -791,14 +989,43 @@ def main() -> None:
     write_rows(output_dir / "predictions.csv", prediction_rows)
     write_rows(output_dir / "skipped_files.csv", skipped)
 
-    metric_sets = [
-        calculate_metrics(prediction_rows, class_names, output_dir, "overall")
-    ]
+    groups: list[tuple[str, list[dict[str, Any]]]] = [("overall", list(prediction_rows))]
     for source_folder in sorted({row["source_folder"] for row in prediction_rows}):
-        group_rows = [row for row in prediction_rows if row["source_folder"] == source_folder]
-        metric_sets.append(
-            calculate_metrics(group_rows, class_names, output_dir, source_folder)
+        groups.append(
+            (source_folder, [row for row in prediction_rows if row["source_folder"] == source_folder])
         )
+    metric_sets = [
+        calculate_metrics(group_rows, class_names, output_dir, group_name)
+        for group_name, group_rows in groups
+    ]
+
+    compare_metric_sets: list[dict[str, Any]] = []
+    comparison_sets: list[dict[str, Any]] = []
+    if compare_model is not None:
+        compare_output_dir = output_dir / "compare_model"
+        compare_output_dir.mkdir(parents=True, exist_ok=True)
+        for (group_name, group_rows), baseline_metrics in zip(groups, metric_sets):
+            compare_rows = [
+                {
+                    "true_label": row["true_label"],
+                    "predicted_label": row["compare_predicted_label"],
+                    "confidence": row["compare_confidence"],
+                }
+                for row in group_rows
+            ]
+            compare_metrics = calculate_metrics(
+                compare_rows, class_names, compare_output_dir, group_name
+            )
+            compare_metric_sets.append(compare_metrics)
+            comparison_sets.append(
+                summarize_model_comparison(group_rows, baseline_metrics, compare_metrics)
+            )
+        write_rows(output_dir / "model_comparison.csv", comparison_sets)
+        disagreements = sorted(
+            (row for row in prediction_rows if not row["prediction_match"]),
+            key=lambda row: -float(row["prob_max_abs_diff"]),
+        )
+        write_rows(output_dir / "prediction_disagreements.csv", disagreements)
 
     summary_fields = (
         "group",
@@ -837,6 +1064,17 @@ def main() -> None:
         "error_wav_dir": str(error_wav_dir) if error_wav_dir is not None else None,
         "metrics": metric_sets,
     }
+    if compare_model is not None:
+        summary["compare_model"] = {
+            "path": str(compare_model_path),
+            "kind": compare_model.kind,
+            "input_dtype": compare_model.input_dtype.name,
+            "input_quantization": [float(compare_model.input_quantization[0]), int(compare_model.input_quantization[1])],
+            "output_dtype": compare_model.output_dtype.name,
+            "output_quantization": [float(compare_model.output_quantization[0]), int(compare_model.output_quantization[1])],
+        }
+        summary["compare_metrics"] = compare_metric_sets
+        summary["model_comparison"] = comparison_sets
     with (output_dir / "evaluation_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, ensure_ascii=True)
 
@@ -847,6 +1085,18 @@ def main() -> None:
         f"balanced_accuracy={overall['balanced_accuracy']:.4f}, "
         f"macro_f1={overall['macro_f1']:.4f}"
     )
+    for comparison in comparison_sets:
+        print(
+            f"Compare [{comparison['group']}]: "
+            f"baseline_acc={comparison['baseline_accuracy']:.4f}, "
+            f"compare_acc={comparison['compare_accuracy']:.4f}, "
+            f"delta={comparison['accuracy_delta']:+.4f}, "
+            f"agreement={comparison['prediction_agreement']:.4f} "
+            f"({comparison['disagreement_count']} differ, "
+            f"baseline_only_correct={comparison['baseline_only_correct']}, "
+            f"compare_only_correct={comparison['compare_only_correct']}), "
+            f"prob_max_abs_diff={comparison['prob_max_abs_diff']:.4f}"
+        )
     print(f"Outputs: {output_dir}")
 
 

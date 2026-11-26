@@ -172,9 +172,9 @@ extern "C" esp_err_t model_runner_int8_predict(
     std::memcpy(s_input->data.int8, quantized_features,
                 AUDIO_LOGMEL_MODEL_INPUT_VALUES * sizeof(int8_t));
 
-    memory_monitor_checkpoint("TFLITE_INVOKE_BEGIN");
+    /* No memory_monitor checkpoints here: in the streaming app this runs every
+     * 2 s, and the 8 heap log lines would inflate the measured invoke time. */
     const TfLiteStatus invoke_status = s_interpreter->Invoke();
-    memory_monitor_checkpoint("TFLITE_INVOKE_END");
     if (invoke_status != kTfLiteOk) {
         ESP_LOGE(TAG, "Invoke failed");
         return ESP_FAIL;

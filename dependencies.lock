@@ -1,0 +1,21 @@
+dependencies:
+  espressif/esp-nn:
+    component_hash: null
+    source:
+      path: C:\Users\Potato\ESP_project file\TTGO_I2S_Record_Test\managed_components\espressif__esp-nn
+      type: local
+    version: 1.2.3
+  espressif/esp-tflite-micro:
+    component_hash: null
+    source:
+      path: C:\Users\Potato\ESP_project file\TTGO_I2S_Record_Test\managed_components\espressif__esp-tflite-micro
+      type: local
+    version: 1.3.7
+  idf:
+    component_hash: null
+    source:
+      type: idf
+    version: 5.1.2
+manifest_hash: 2dec7f66b262e12e259adfe7a55ecc51a34d858c2d6b269ef4d1a57a279826c2
+target: esp32
+version: 1.0.0
